@@ -47,6 +47,8 @@
             pkg-config
           ];
 
+          doCheck = false;
+
           meta = with pkgs.lib; {
             description = "RAG MCP Server with embedding-based document retrieval";
             license = licenses.mit;

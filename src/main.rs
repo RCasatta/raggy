@@ -700,4 +700,53 @@ mod tests {
             "Different sentences should not have perfect similarity"
         );
     }
+
+    #[test]
+    fn test_mcp_integration() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
+        let model_path = PathBuf::from("models/all-MiniLM-L6-v2/model.safetensors");
+
+        if !model_path.exists() {
+            panic!(
+                "Model not found at {}. Please run ./download_model.sh to download the model.",
+                model_path.display()
+            );
+        }
+
+        let args = Args {
+            model: model_path,
+            dir: PathBuf::from("."),
+            extensions: ".md".to_string(),
+            chunk_size: 512,
+            chunk_overlap: 50,
+        };
+
+        let state = Arc::new(RaggyState::new(args));
+
+        state
+            .load_model_and_tokenizer()
+            .expect("Failed to load model");
+
+        state.index_files().expect("Failed to index files");
+
+        tracing::info!("Making query");
+        let result = state.query("How do I launch the project with nix?", 3);
+
+        assert!(result.is_ok(), "Query should succeed");
+
+        let response = result.unwrap();
+        assert!(
+            !response.results.is_empty(),
+            "Should return at least one result"
+        );
+
+        tracing::info!(
+            "Query returned {} results, first result: {:?}",
+            response.results.len(),
+            response.results.first()
+        );
+    }
 }
