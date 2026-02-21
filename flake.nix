@@ -22,6 +22,7 @@
 
         buildInputs = with pkgs; [
           rustToolchain
+          nodejs
           openssl
           pkg-config
         ];

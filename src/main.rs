@@ -3,6 +3,7 @@ use candle_core::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use clap::Parser;
+use ignore::WalkBuilder;
 use parking_lot::RwLock;
 use rmcp::{
     RoleServer, ServiceExt,
@@ -18,13 +19,16 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
+use std::time::UNIX_EPOCH;
 use tokenizers::{PaddingParams, Tokenizer};
-use walkdir::WalkDir;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RaggyError {
@@ -92,13 +96,24 @@ struct QueryResponse {
     indexing_status: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TextChunk {
     path: String,
     start_line: usize,
     end_line: usize,
     embedding: Vec<f32>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedIndex {
+    version: u32,
+    model_dir: String,
+    dir: String,
+    files: HashMap<String, u128>,
+    chunks: Vec<TextChunk>,
+}
+
+const CACHE_VERSION: u32 = 1;
 
 struct RaggyState {
     args: Args,
@@ -233,18 +248,105 @@ impl RaggyState {
         chunks
     }
 
+    fn cache_file_path(&self) -> Result<PathBuf, RaggyError> {
+        let cache_root = cache_root_dir()?;
+        let model_dir = canonicalize_or_original(&self.args.model_dir);
+        let index_dir = canonicalize_or_original(&self.args.dir);
+        let key_input = format!("{}\n{}", model_dir.display(), index_dir.display());
+
+        let hash = Sha256::digest(key_input.as_bytes());
+        let hash_hex = hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Ok(cache_root.join(format!("{hash_hex}.json")))
+    }
+
+    fn load_cache(&self, cache_path: &Path) -> Option<CachedIndex> {
+        let raw = fs::read_to_string(cache_path).ok()?;
+        let cache: CachedIndex = match serde_json::from_str(&raw) {
+            Ok(cache) => cache,
+            Err(e) => {
+                tracing::warn!("Ignoring corrupted cache {}: {e}", cache_path.display());
+                return None;
+            }
+        };
+
+        if cache.version != CACHE_VERSION {
+            tracing::info!(
+                "Ignoring cache {} because version {} != {}",
+                cache_path.display(),
+                cache.version,
+                CACHE_VERSION
+            );
+            return None;
+        }
+
+        Some(cache)
+    }
+
+    fn save_cache(
+        &self,
+        cache_path: &Path,
+        files: HashMap<String, u128>,
+        chunks: Vec<TextChunk>,
+    ) -> Result<(), RaggyError> {
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                RaggyError::IndexingError(format!(
+                    "Failed to create cache dir {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let cache = CachedIndex {
+            version: CACHE_VERSION,
+            model_dir: canonicalize_or_original(&self.args.model_dir)
+                .display()
+                .to_string(),
+            dir: canonicalize_or_original(&self.args.dir)
+                .display()
+                .to_string(),
+            files,
+            chunks,
+        };
+
+        let serialized = serde_json::to_vec(&cache)
+            .map_err(|e| RaggyError::IndexingError(format!("Failed to serialize cache: {e}")))?;
+
+        let tmp_path = cache_path.with_extension("json.tmp");
+        fs::write(&tmp_path, serialized).map_err(|e| {
+            RaggyError::IndexingError(format!("Failed to write cache {}: {e}", tmp_path.display()))
+        })?;
+        fs::rename(&tmp_path, cache_path).map_err(|e| {
+            RaggyError::IndexingError(format!(
+                "Failed to finalize cache {} -> {}: {e}",
+                tmp_path.display(),
+                cache_path.display()
+            ))
+        })?;
+
+        Ok(())
+    }
+
     fn index_files(&self) -> Result<(), RaggyError> {
         *self.indexing_status.write() = "in_progress".to_string();
 
         let extensions = self.get_extensions();
-        let mut all_chunks = Vec::new();
-        let mut indexed_files = Vec::new();
+        let mut current_files = Vec::new();
 
-        for entry in WalkDir::new(&self.args.dir)
+        let walker = WalkBuilder::new(&self.args.dir)
             .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+            .hidden(false)
+            .ignore(false)
+            .build();
+
+        for entry in walker {
+            let Ok(entry) = entry else {
+                continue;
+            };
+
             let path = entry.path();
 
             if !path.is_file() {
@@ -261,28 +363,18 @@ impl RaggyState {
                 continue;
             }
 
-            let content = match fs::read_to_string(path) {
-                Ok(c) => c,
+            let mtime = match path.metadata().and_then(|m| m.modified()) {
+                Ok(modified) => modified
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0),
                 Err(_) => continue,
             };
 
-            indexed_files.push(path.display().to_string());
-            tracing::debug!("Indexing file: {}", path.display());
-
-            let text_chunks = self.chunk_text(&content);
-
-            for (chunk_text, start_line, end_line) in text_chunks {
-                all_chunks.push((path.display().to_string(), chunk_text, start_line, end_line));
-            }
+            current_files.push((path.to_path_buf(), path.display().to_string(), mtime));
         }
 
-        tracing::debug!(
-            "Indexed {} files, created {} chunks",
-            indexed_files.len(),
-            all_chunks.len()
-        );
-
-        if all_chunks.is_empty() {
+        if current_files.is_empty() {
             *self.indexing_status.write() = "failed".to_string();
             return Err(RaggyError::EmptyDirectory(
                 self.args.dir.display().to_string(),
@@ -310,21 +402,81 @@ impl RaggyState {
             }
         };
 
-        let mut indexed_chunks = Vec::new();
+        let cache_path = self.cache_file_path()?;
+        let cache = self.load_cache(&cache_path);
 
-        for (path, chunk_text, start_line, end_line) in all_chunks {
-            match get_embedding(model, tokenizer, &chunk_text) {
-                Ok(embedding) => {
-                    let normalized = normalize_l2(&embedding);
-                    indexed_chunks.push(TextChunk {
-                        path,
-                        start_line,
-                        end_line,
-                        embedding: normalized,
-                    });
-                }
-                Err(_) => continue,
+        let mut cached_chunks_by_path: HashMap<String, Vec<TextChunk>> = HashMap::new();
+        let cached_files = if let Some(cache) = cache {
+            for chunk in cache.chunks {
+                cached_chunks_by_path
+                    .entry(chunk.path.clone())
+                    .or_default()
+                    .push(chunk);
             }
+            cache.files
+        } else {
+            HashMap::new()
+        };
+
+        let mut indexed_chunks = Vec::new();
+        let mut indexed_files = HashMap::new();
+        let mut reused_files = 0usize;
+        let mut reindexed_files = 0usize;
+
+        for (path_buf, path_string, mtime) in current_files {
+            let is_unchanged = cached_files
+                .get(&path_string)
+                .map(|cached_mtime| *cached_mtime == mtime)
+                .unwrap_or(false);
+
+            if is_unchanged && let Some(cached_chunks) = cached_chunks_by_path.remove(&path_string)
+            {
+                indexed_chunks.extend(cached_chunks);
+                indexed_files.insert(path_string, mtime);
+                reused_files += 1;
+                continue;
+            }
+
+            let content = match fs::read_to_string(&path_buf) {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+
+            let text_chunks = self.chunk_text(&content);
+            for (chunk_text, start_line, end_line) in text_chunks {
+                match get_embedding(model, tokenizer, &chunk_text) {
+                    Ok(embedding) => {
+                        let normalized = normalize_l2(&embedding);
+                        indexed_chunks.push(TextChunk {
+                            path: path_string.clone(),
+                            start_line,
+                            end_line,
+                            embedding: normalized,
+                        });
+                    }
+                    Err(_) => continue,
+                }
+            }
+            indexed_files.insert(path_string, mtime);
+            reindexed_files += 1;
+        }
+
+        if indexed_chunks.is_empty() {
+            *self.indexing_status.write() = "failed".to_string();
+            return Err(RaggyError::EmptyDirectory(
+                self.args.dir.display().to_string(),
+            ));
+        }
+
+        tracing::info!(
+            "Index ready: reused {} files, reindexed {} files, total chunks {}",
+            reused_files,
+            reindexed_files,
+            indexed_chunks.len()
+        );
+
+        if let Err(e) = self.save_cache(&cache_path, indexed_files, indexed_chunks.clone()) {
+            tracing::warn!("Failed to persist cache: {e}");
         }
 
         *self.chunks.write() = indexed_chunks;
@@ -385,6 +537,24 @@ impl RaggyState {
             indexing_status: status,
         })
     }
+}
+
+fn canonicalize_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn cache_root_dir() -> Result<PathBuf, RaggyError> {
+    if let Some(xdg_cache_home) = env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(xdg_cache_home).join("raggy"));
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".cache").join("raggy"));
+    }
+
+    Err(RaggyError::IndexingError(
+        "Cannot resolve cache directory (XDG_CACHE_HOME and HOME are unset)".to_string(),
+    ))
 }
 
 fn find_overlap(text: &str, overlap_size: usize) -> String {

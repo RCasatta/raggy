@@ -37,6 +37,20 @@ Optional arguments:
 - `--chunk_size`: Size of text chunks (default: 512)
 - `--chunk_overlap`: Overlap between chunks (default: 50)
 
+## Manual Query from Terminal
+
+You can query Raggy manually using the MCP Inspector:
+
+```bash
+npx -y @modelcontextprotocol/inspector ./target/release/raggy --model_dir ./models/all-MiniLM-L6-v2 --dir .
+```
+
+Then open the local URL printed by Inspector, call `raggy_query`, and pass JSON input like:
+
+```json
+{"question":"how do I run the project with nix?","top_k":5}
+```
+
 ## Development
 
 ```bash
