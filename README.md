@@ -2,6 +2,25 @@
 
 A RAG (Retrieval Augmented Generation) MCP Server that provides semantic search over documents using BERT embeddings.
 
+```json
+{
+  "mcpServers": {
+    "raggy": {
+      "command": "raggy",
+      "args": [
+        "mcp",
+        "--model-dir",
+        "/home/user/models/all-MiniLM-L6-v2",
+        "--dir",
+        "/home/user/knowledge-base",
+        "--query-tool-description",
+        "Search my local notes and docs using semantic similarity."
+      ]
+    }
+  }
+}
+```
+
 ## Model
 
 The system need an embedding BERT model to operate.
