@@ -492,12 +492,13 @@ impl RaggyState {
                 .map(|cached_mtime| *cached_mtime == mtime)
                 .unwrap_or(false);
 
-            if is_unchanged && let Some(cached_chunks) = cached_chunks_by_path.remove(&path_string)
-            {
-                indexed_chunks.extend(cached_chunks);
-                indexed_files.insert(path_string, mtime);
-                reused_files += 1;
-                continue;
+            if is_unchanged {
+                if let Some(cached_chunks) = cached_chunks_by_path.remove(&path_string) {
+                    indexed_chunks.extend(cached_chunks);
+                    indexed_files.insert(path_string, mtime);
+                    reused_files += 1;
+                    continue;
+                }
             }
 
             let content = match fs::read_to_string(&path_buf) {
