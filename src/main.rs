@@ -1,8 +1,10 @@
+use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use clap::{Args as ClapArgs, Parser, Subcommand};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 
+use raggy::chunking::{ChunkStrategy, chunk_text};
 use raggy::{Args, RaggyState};
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -59,6 +61,30 @@ struct McpCommandArgs {
     query_tool_description: Option<String>,
 }
 
+#[derive(ValueEnum, Debug, Clone)]
+enum StrategyArg {
+    Auto,
+    Default,
+    Markdown,
+    Rust,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+struct ChunksCommandArgs {
+    /// File to split into chunks
+    file: PathBuf,
+
+    #[arg(long, default_value = "512")]
+    chunk_size: usize,
+
+    #[arg(long, default_value = "50")]
+    chunk_overlap: usize,
+
+    /// Chunking strategy (auto-detected from extension by default)
+    #[arg(long, default_value = "auto")]
+    strategy: StrategyArg,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
     #[command(about = "Start the MCP server")]
@@ -67,6 +93,8 @@ enum Command {
     Index(CommonArgs),
     #[command(about = "Run a semantic query against indexed files")]
     Query(QueryCommandArgs),
+    #[command(about = "Split a file into chunks and print them")]
+    Chunks(ChunksCommandArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -106,6 +134,41 @@ fn run_query(args: Args, question: &str, top_k: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_chunks(args: ChunksCommandArgs) -> anyhow::Result<()> {
+    let content = fs::read_to_string(&args.file)?;
+
+    let strategy = match args.strategy {
+        StrategyArg::Auto => {
+            let ext = args
+                .file
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            ChunkStrategy::for_extension(&ext)
+        }
+        StrategyArg::Default => ChunkStrategy::Default,
+        StrategyArg::Markdown => ChunkStrategy::Markdown,
+        StrategyArg::Rust => ChunkStrategy::Rust,
+    };
+
+    let chunks = chunk_text(&content, args.chunk_size, args.chunk_overlap, &strategy);
+
+    for (i, (text, start_line, end_line)) in chunks.iter().enumerate() {
+        println!(
+            "--- chunk {} | lines {start_line}-{end_line} | {} chars ---",
+            i + 1,
+            text.len()
+        );
+        println!("{text}");
+        println!();
+    }
+
+    println!("Total: {} chunks", chunks.len());
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -124,6 +187,7 @@ fn main() -> anyhow::Result<()> {
             &query_args.question,
             query_args.top_k,
         ),
+        Command::Chunks(chunks_args) => run_chunks(chunks_args),
     }
 }
 
@@ -202,6 +266,42 @@ mod tests {
                 assert_eq!(query_args.common.extensions, ".txt,.md");
             }
             _ => panic!("Expected query subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_chunks_subcommand() {
+        let cli = Cli::try_parse_from(["raggy", "chunks", "src/main.rs"])
+            .expect("chunks subcommand should parse with defaults");
+        match cli.command {
+            Command::Chunks(args) => {
+                assert_eq!(args.file, PathBuf::from("src/main.rs"));
+                assert_eq!(args.chunk_size, 512);
+                assert_eq!(args.chunk_overlap, 50);
+                assert!(matches!(args.strategy, StrategyArg::Auto));
+            }
+            _ => panic!("Expected chunks subcommand"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "raggy",
+            "chunks",
+            "README.md",
+            "--chunk-size",
+            "256",
+            "--chunk-overlap",
+            "20",
+            "--strategy",
+            "markdown",
+        ])
+        .expect("chunks with explicit options should parse");
+        match cli.command {
+            Command::Chunks(args) => {
+                assert_eq!(args.chunk_size, 256);
+                assert_eq!(args.chunk_overlap, 20);
+                assert!(matches!(args.strategy, StrategyArg::Markdown));
+            }
+            _ => panic!("Expected chunks subcommand"),
         }
     }
 

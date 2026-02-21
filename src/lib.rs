@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
 use crate::cache::{cache_file_path, load_cache, save_cache};
-use crate::chunking::chunk_text;
+use crate::chunking::{ChunkStrategy, chunk_text};
 use crate::model::{cosine_similarity, get_embedding, normalize_l2};
 
 #[derive(Debug, thiserror::Error)]
@@ -232,7 +232,18 @@ impl RaggyState {
                 Err(_) => continue,
             };
 
-            let text_chunks = chunk_text(&content, self.args.chunk_size, self.args.chunk_overlap);
+            let ext = path_buf
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            let strategy = ChunkStrategy::for_extension(&ext);
+            let text_chunks = chunk_text(
+                &content,
+                self.args.chunk_size,
+                self.args.chunk_overlap,
+                &strategy,
+            );
             for (chunk_text, start_line, end_line) in text_chunks {
                 match get_embedding(model, tokenizer, &chunk_text) {
                     Ok(embedding) => {
