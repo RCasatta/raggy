@@ -19,6 +19,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -50,7 +51,7 @@ pub enum RaggyError {
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long)]
-    model: PathBuf,
+    model_dir: PathBuf,
 
     #[arg(long)]
     dir: PathBuf,
@@ -120,27 +121,38 @@ impl RaggyState {
         }
     }
 
+    fn model_paths(&self) -> (PathBuf, PathBuf, PathBuf) {
+        let model_dir = &self.args.model_dir;
+        let model_path = model_dir.join("model.safetensors");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        let config_path = model_dir.join("config.json");
+        (model_path, tokenizer_path, config_path)
+    }
+
     fn verify_model_exists(&self) -> Result<(), RaggyError> {
-        if !self.args.model.exists() {
+        let (model_path, tokenizer_path, config_path) = self.model_paths();
+
+        if !model_path.exists() {
             return Err(RaggyError::MissingModelFile(
-                self.args.model.display().to_string(),
+                model_path.display().to_string(),
             ));
         }
+        if !tokenizer_path.exists() {
+            return Err(RaggyError::MissingModelFile(
+                tokenizer_path.display().to_string(),
+            ));
+        }
+        if !config_path.exists() {
+            return Err(RaggyError::MissingModelFile(
+                config_path.display().to_string(),
+            ));
+        }
+
         Ok(())
     }
 
     fn load_model_and_tokenizer(&self) -> Result<()> {
-        let model_path = &self.args.model;
-
-        let tokenizer_path = model_path
-            .parent()
-            .map(|p| p.join("tokenizer.json"))
-            .unwrap_or_else(|| PathBuf::from("tokenizer.json"));
-
-        let config_path = model_path
-            .parent()
-            .map(|p| p.join("config.json"))
-            .unwrap_or_else(|| PathBuf::from("config.json"));
+        let (model_path, tokenizer_path, config_path) = self.model_paths();
 
         let config_str = fs::read_to_string(&config_path)
             .map_err(|e| RaggyError::CorruptModel(format!("Failed to read config: {}", e)))?;
@@ -158,13 +170,26 @@ impl RaggyState {
                 "GGUF format not yet supported, please use safetensors format"
             ));
         } else {
-            unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DTYPE, &device)? }
+            unsafe { VarBuilder::from_mmaped_safetensors(&[&model_path], DTYPE, &device)? }
         };
 
         let model = BertModel::load(vb, &config)?;
 
         *self.model.write() = Some(model);
         *self.tokenizer.write() = Some(tokenizer);
+
+        Ok(())
+    }
+
+    fn ensure_model_and_tokenizer_loaded(&self) -> Result<(), RaggyError> {
+        let model_is_loaded = self.model.read().is_some();
+        let tokenizer_is_loaded = self.tokenizer.read().is_some();
+        if model_is_loaded && tokenizer_is_loaded {
+            return Ok(());
+        }
+
+        self.load_model_and_tokenizer()
+            .map_err(|e| RaggyError::IndexingError(format!("Failed to load model: {e}")))?;
 
         Ok(())
     }
@@ -260,7 +285,7 @@ impl RaggyState {
         );
 
         if all_chunks.is_empty() {
-            *self.indexing_status.write() = "complete".to_string();
+            *self.indexing_status.write() = "failed".to_string();
             return Err(RaggyError::EmptyDirectory(
                 self.args.dir.display().to_string(),
             ));
@@ -272,7 +297,7 @@ impl RaggyState {
         let model = match model_guard.as_ref() {
             Some(m) => m,
             None => {
-                *self.indexing_status.write() = "not_started".to_string();
+                *self.indexing_status.write() = "failed".to_string();
                 return Err(RaggyError::IndexingError("Model not loaded".to_string()));
             }
         };
@@ -280,7 +305,7 @@ impl RaggyState {
         let tokenizer = match tokenizer_guard.as_ref() {
             Some(t) => t,
             None => {
-                *self.indexing_status.write() = "not_started".to_string();
+                *self.indexing_status.write() = "failed".to_string();
                 return Err(RaggyError::IndexingError(
                     "Tokenizer not loaded".to_string(),
                 ));
@@ -547,9 +572,24 @@ impl ServerHandler for RaggyServer {
                 }
             }
             "raggy_index" => {
+                self.state.verify_model_exists().map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("Cannot start indexing, model check failed: {e}"),
+                        None,
+                    )
+                })?;
+
+                self.state
+                    .ensure_model_and_tokenizer_loaded()
+                    .map_err(|e| {
+                        ErrorData::internal_error(format!("Cannot start indexing: {e}"), None)
+                    })?;
+
                 let state = Arc::clone(&self.state);
                 thread::spawn(move || {
-                    let _ = state.index_files();
+                    if let Err(e) = state.index_files() {
+                        tracing::error!("Background indexing failed: {e}");
+                    }
                 });
 
                 Ok(CallToolResult::success(vec![Content::text(
@@ -610,11 +650,14 @@ impl ServerHandler for RaggyServer {
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    tracing_subscriber::fmt::init();
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(io::stderr)
+        .try_init();
     tracing::info!("Starting Raggy MCP Server");
     tracing::debug!(
-        "Model: {}, Dir: {}",
-        args.model.display(),
+        "Model dir: {}, Dir: {}",
+        args.model_dir.display(),
         args.dir.display()
     );
 
@@ -717,7 +760,7 @@ mod tests {
         }
 
         let args = Args {
-            model: model_path,
+            model_dir: PathBuf::from("models/all-MiniLM-L6-v2"),
             dir: PathBuf::from("."),
             extensions: ".md".to_string(),
             chunk_size: 512,

@@ -10,7 +10,7 @@ Raggy is a RAG (Retrieval Augmented Generation) MCP Server that provides semanti
 
 ### Standard Build
 ```bash
-cargo build          # Debug build
+cargo build           # Debug build
 cargo build --release # Release build
 ```
 
@@ -43,15 +43,26 @@ This project has a test that requires a BERT model. The model must be downloaded
 
 ```bash
 ./download_model.sh   # Download the model (first time only)
-cargo test           # Run all tests
+cargo test --release  # Run all tests, some tests are demanding and release flag is suggested
 ```
 
-### Using Nix (Optional)
+### Nix / direnv Environment
+
+This project provides a Nix development shell via `direnv` / `nix-direnv`. Some agents may already operate inside an activated Nix environment where tools like `cargo` are available directly. Others (e.g., sandboxed agents) may not.
+
+If a build command fails with missing toolchain or dependency errors, retry it through the cached Nix environment:
 
 ```bash
-nix develop         # Enter development shell
-nix build           # Build the package
+direnv exec . <command>   # e.g. direnv exec . cargo check
 ```
+
+`direnv exec .` uses the cached `nix-direnv` environment and is effectively instant — there is no need to run `nix develop` interactively.
+
+```bash
+nix build           # Build the Nix package directly
+```
+
+When creating bash scripts in this project, use `#!/usr/bin/env bash` as the shebang for NixOS compatibility.
 
 ## Code Style Guidelines
 
@@ -61,6 +72,8 @@ nix build           # Build the package
 - Keep functions small and focused on a single responsibility
 - Use early returns to reduce nesting
 - Prefer composition over inheritance
+- Avoid adding new dependencies unless explicitly asked; prefer standard library implementations
+- Use interpolated variables in format strings: `format!("msg {var}")` instead of `format!("msg {}", var)`
 
 ### Imports
 
@@ -81,76 +94,13 @@ use serde::{Deserialize, Serialize};
 use crate::module::Item;
 ```
 
-### Formatting
+### Logging
 
-- Use `cargo fmt` for automatic formatting
-- Maximum line length: 100 characters (default rustfmt)
-- Use 4 spaces for indentation
-- Use trailing commas in multi-line collections
-- Place braces on the same line for function definitions
-
-### Types
-
-- Use explicit type annotations for public API parameters and return types
-- Prefer idiomatic Rust types: `&str` over `&String`, `&[T]` over `&Vec<T>`
-- Use `Arc` for shared ownership across threads
-- Use `RwLock` for interior mutability with multiple readers
-
-```rust
-// Good
-fn process_data(input: &str) -> Result<Vec<ProcessingItem>>
-
-// Avoid
-fn process_data(input: &String) -> Vec<ProcessingItem>
-```
-
-### Naming Conventions
-
-- **Variables/Functions**: `snake_case` (e.g., `load_model`, `chunk_size`)
-- **Types/Structs/Enums**: `PascalCase` (e.g., `RaggyState`, `QueryParams`)
-- **Constants**: `SCREAMING_SNAKE_CASE` (e.g., `MAX_CHUNK_SIZE`)
-- **Modules**: `snake_case` (e.g., `mod indexer`)
-- **Traits**: `PascalCase` with `-er` suffix when applicable (e.g., `Handler`)
-
-### Error Handling
-
-- Use `anyhow::Result<()>` for application-level error handling with context
-- Use `thiserror` for defining custom error types with meaningful messages
-- Use `?` operator for propagating errors
-- Return `Result<T, ErrorData>` for MCP protocol errors
-
-```rust
-#[derive(Debug, thiserror::Error)]
-pub enum RaggyError {
-    #[error("Missing model file: {0}")]
-    MissingModelFile(String),
-    
-    #[error("Indexing error: {0}")]
-    IndexingError(String),
-}
-
-fn load_config(&self) -> Result<Config, RaggyError> {
-    let content = fs::read_to_string(&self.path)
-        .map_err(|e| RaggyError::IndexingError(format!("Failed to read: {}", e)))?;
-    
-    serde_json::from_str(&content)
-        .map_err(|e| RaggyError::IndexingError(format!("Failed to parse: {}", e)))
-}
-```
-
-### Async/Tokio
-
-- Use `tokio::spawn` for background tasks
-- Use `thread::spawn` when blocking operations are needed
-- Be explicit about async vs sync boundaries
-
-### Documentation
-
-- Add doc comments (`///`) for public API items
-- Keep documentation concise but informative
-- Document error conditions for fallible functions
+This project uses the `tracing` crate. Use `tracing::info!`, `tracing::warn!`, etc. instead of `println!` for runtime output.
 
 ### Dependencies
+
+Avoid adding new dependencies unless explicitly asked. Prefer standard library implementations when possible.
 
 This project uses:
 - `anyhow` - Application error handling
@@ -161,39 +111,6 @@ This project uses:
 - `rmcp` - MCP protocol server
 - `serde` - Serialization
 - `tracing` - Logging
-
-### Common Patterns
-
-#### Using `parking_lot::RwLock`
-```rust
-struct State {
-    data: RwLock<Vec<Item>>,
-}
-
-impl State {
-    fn read_items(&self) -> Vec<Item> {
-        self.data.read().clone()
-    }
-    
-    fn update_items(&self, items: Vec<Item>) {
-        *self.data.write() = items;
-    }
-}
-```
-
-#### Pattern Matching with Early Return
-```rust
-let value = match option {
-    Some(v) => v,
-    None => return Err(Error::MissingValue),
-};
-```
-
-#### Using `?` with Context
-```rust
-let config: Config = serde_json::from_str(&content)
-    .map_err(|e| MyError::ParseError(format!("Config error: {}", e)))?;
-```
 
 ## Architecture Notes
 
@@ -207,9 +124,22 @@ let config: Config = serde_json::from_str(&content)
 
 1. Make changes to source code
 2. Run `cargo fmt` to format
-3. Run `cargo clippy` to catch common mistakes
-4. Run `cargo check` to verify compilation
-5. Test functionality with `cargo run --release`
+3. Run `cargo clippy` to catch common mistakes — verify zero warnings on new code
+4. Run `cargo check --tests` to verify compilation (preferred over `cargo build` for speed)
+5. Test functionality with `cargo test --release`
+
+## Git Commit Conventions
+
+- **Format:** `context: <description>`
+- **Context:** Use the specific crate/directory name, or categories like `ci`, `fix`, `feat`, `docs`, or `refactor`.
+- **Breaking Changes:** Append `!` after the context (e.g., `feat!: rewrite api`).
+- **Title (first line):**
+  - Max 50 characters
+  - Use imperative mood ("add", not "added")
+  - No period at the end
+- **Body:**
+  - Separate from title with a blank line
+  - Focus on "why"; use bullet points for multiple items
 
 ## File Locations
 
