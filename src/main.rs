@@ -305,18 +305,19 @@ impl RaggyState {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        Ok(cache_root.join(format!("{hash_hex}.json")))
+        Ok(cache_root.join(format!("{hash_hex}.bin")))
     }
 
     fn load_cache(&self, cache_path: &Path) -> Option<CachedIndex> {
-        let raw = fs::read_to_string(cache_path).ok()?;
-        let cache: CachedIndex = match serde_json::from_str(&raw) {
-            Ok(cache) => cache,
-            Err(e) => {
-                tracing::warn!("Ignoring corrupted cache {}: {e}", cache_path.display());
-                return None;
-            }
-        };
+        let raw = fs::read(cache_path).ok()?;
+        let cache: CachedIndex =
+            match bincode::serde::decode_from_slice(&raw, bincode::config::standard()) {
+                Ok((cache, _)) => cache,
+                Err(e) => {
+                    tracing::warn!("Ignoring corrupted cache {}: {e}", cache_path.display());
+                    return None;
+                }
+            };
 
         if cache.version != CACHE_VERSION {
             tracing::info!(
@@ -358,10 +359,10 @@ impl RaggyState {
             chunks,
         };
 
-        let serialized = serde_json::to_vec(&cache)
+        let serialized = bincode::serde::encode_to_vec(&cache, bincode::config::standard())
             .map_err(|e| RaggyError::IndexingError(format!("Failed to serialize cache: {e}")))?;
 
-        let tmp_path = cache_path.with_extension("json.tmp");
+        let tmp_path = cache_path.with_extension("bin.tmp");
         fs::write(&tmp_path, serialized).map_err(|e| {
             RaggyError::IndexingError(format!("Failed to write cache {}: {e}", tmp_path.display()))
         })?;
