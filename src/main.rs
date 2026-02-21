@@ -116,8 +116,11 @@ struct McpCommandArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
+    #[command(about = "Start the MCP server")]
     Mcp(McpCommandArgs),
+    #[command(about = "Index files in the configured directory")]
     Index(CommonArgs),
+    #[command(about = "Run a semantic query against indexed files")]
     Query(QueryCommandArgs),
 }
 
