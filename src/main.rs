@@ -102,9 +102,21 @@ struct QueryCommandArgs {
     top_k: usize,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+struct McpCommandArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    #[arg(
+        long,
+        help = "Override raggy_query tool description shown to MCP clients"
+    )]
+    query_tool_description: Option<String>,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
-    Mcp(CommonArgs),
+    Mcp(McpCommandArgs),
     Index(CommonArgs),
     Query(QueryCommandArgs),
 }
@@ -160,6 +172,10 @@ struct CachedIndex {
 }
 
 const CACHE_VERSION: u32 = 1;
+const DEFAULT_QUERY_TOOL_DESCRIPTION: &str = "Search for relevant text chunks using semantic similarity. Returns documents matching the query.";
+const DEFAULT_INDEX_TOOL_DESCRIPTION: &str =
+    "Trigger re-indexing of the configured directory. Indexing happens in the background.";
+const DEFAULT_MCP_INSTRUCTIONS: &str = "Use raggy_query to search for relevant text chunks in indexed documents. Use raggy_index to trigger re-indexing.";
 
 struct RaggyState {
     args: Args,
@@ -708,12 +724,15 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[derive(Clone)]
 struct RaggyServer {
     state: Arc<RaggyState>,
+    query_tool_description: String,
 }
 
 impl RaggyServer {
-    fn new(args: Args) -> Self {
+    fn new(args: Args, query_tool_description: Option<String>) -> Self {
         Self {
             state: Arc::new(RaggyState::new(args)),
+            query_tool_description: query_tool_description
+                .unwrap_or_else(|| DEFAULT_QUERY_TOOL_DESCRIPTION.to_string()),
         }
     }
 }
@@ -755,7 +774,7 @@ impl ServerHandler for RaggyServer {
                 Tool {
                     name: "raggy_query".into(),
                     title: None,
-                    description: Some("Search for relevant text chunks using semantic similarity. Returns documents matching the query.".into()),
+                    description: Some(self.query_tool_description.clone().into()),
                     input_schema: query_input_schema_map,
                     output_schema: None,
                     annotations: None,
@@ -764,12 +783,12 @@ impl ServerHandler for RaggyServer {
                 Tool {
                     name: "raggy_index".into(),
                     title: None,
-                    description: Some("Trigger re-indexing of the configured directory. Indexing happens in the background.".into()),
+                    description: Some(DEFAULT_INDEX_TOOL_DESCRIPTION.into()),
                     input_schema: index_input_schema_map,
                     output_schema: None,
                     annotations: None,
                     icons: None,
-                }
+                },
             ],
             next_cursor: None,
         })
@@ -880,12 +899,12 @@ impl ServerHandler for RaggyServer {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some("Use raggy_query to search for relevant text chunks in indexed documents. Use raggy_index to trigger re-indexing.".to_string()),
+            instructions: Some(DEFAULT_MCP_INSTRUCTIONS.to_string()),
         })
     }
 }
 
-fn run_mcp(args: Args) -> anyhow::Result<()> {
+fn run_mcp(args: Args, query_tool_description: Option<String>) -> anyhow::Result<()> {
     tracing::info!("Starting Raggy MCP Server");
     tracing::debug!(
         "Model dir: {}, Dir: {}",
@@ -893,7 +912,7 @@ fn run_mcp(args: Args) -> anyhow::Result<()> {
         args.dir.display()
     );
 
-    let server = RaggyServer::new(args);
+    let server = RaggyServer::new(args, query_tool_description);
     let rt = tokio::runtime::Runtime::new()?;
 
     rt.block_on(async {
@@ -942,7 +961,7 @@ fn main() -> anyhow::Result<()> {
         .try_init();
 
     match cli.command {
-        Command::Mcp(common_args) => run_mcp(common_args.into()),
+        Command::Mcp(mcp_args) => run_mcp(mcp_args.common.into(), mcp_args.query_tool_description),
         Command::Index(common_args) => run_index(common_args.into()),
         Command::Query(query_args) => run_query(
             query_args.common.into(),
@@ -1085,7 +1104,34 @@ mod tests {
             ".",
         ])
         .expect("mcp subcommand should parse");
-        assert!(matches!(cli.command, Command::Mcp(_)));
+        match cli.command {
+            Command::Mcp(mcp_args) => {
+                assert_eq!(mcp_args.common.extensions, ".txt,.md");
+                assert_eq!(mcp_args.query_tool_description, None);
+            }
+            _ => panic!("Expected mcp subcommand"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "raggy",
+            "mcp",
+            "--model-dir",
+            "models/all-MiniLM-L6-v2",
+            "--dir",
+            ".",
+            "--query-tool-description",
+            "Search my local notes and docs using semantic similarity.",
+        ])
+        .expect("mcp with custom tool description should parse");
+        match cli.command {
+            Command::Mcp(mcp_args) => {
+                assert_eq!(
+                    mcp_args.query_tool_description,
+                    Some("Search my local notes and docs using semantic similarity.".to_string())
+                );
+            }
+            _ => panic!("Expected mcp subcommand"),
+        }
 
         let cli = Cli::try_parse_from([
             "raggy",
