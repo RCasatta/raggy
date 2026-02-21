@@ -2,7 +2,7 @@ use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use ignore::WalkBuilder;
 use parking_lot::RwLock;
 use rmcp::{
@@ -51,9 +51,17 @@ pub enum RaggyError {
     QueryError(String),
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[derive(Debug, Clone)]
 struct Args {
+    model_dir: PathBuf,
+    dir: PathBuf,
+    extensions: String,
+    chunk_size: usize,
+    chunk_overlap: usize,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+struct CommonArgs {
     #[arg(long)]
     model_dir: PathBuf,
 
@@ -68,6 +76,44 @@ struct Args {
 
     #[arg(long, default_value = "50")]
     chunk_overlap: usize,
+}
+
+impl From<CommonArgs> for Args {
+    fn from(value: CommonArgs) -> Self {
+        Self {
+            model_dir: value.model_dir,
+            dir: value.dir,
+            extensions: value.extensions,
+            chunk_size: value.chunk_size,
+            chunk_overlap: value.chunk_overlap,
+        }
+    }
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+struct QueryCommandArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    #[arg(long)]
+    question: String,
+
+    #[arg(long, default_value_t = 10)]
+    top_k: usize,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    Mcp(CommonArgs),
+    Index(CommonArgs),
+    Query(QueryCommandArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -537,6 +583,31 @@ impl RaggyState {
             indexing_status: status,
         })
     }
+
+    fn load_cached_chunks(&self) -> Result<(), RaggyError> {
+        let cache_path = self.cache_file_path()?;
+        let cache = self.load_cache(&cache_path).ok_or_else(|| {
+            RaggyError::QueryError(format!(
+                "No index found at {}. Run `raggy index --model-dir {} --dir {}` first.",
+                cache_path.display(),
+                self.args.model_dir.display(),
+                self.args.dir.display()
+            ))
+        })?;
+
+        if cache.chunks.is_empty() {
+            return Err(RaggyError::QueryError(format!(
+                "Index at {} is empty. Rebuild it with `raggy index --model-dir {} --dir {}`.",
+                cache_path.display(),
+                self.args.model_dir.display(),
+                self.args.dir.display()
+            )));
+        }
+
+        *self.chunks.write() = cache.chunks;
+        *self.indexing_status.write() = "complete".to_string();
+        Ok(())
+    }
 }
 
 fn canonicalize_or_original(path: &Path) -> PathBuf {
@@ -813,13 +884,7 @@ impl ServerHandler for RaggyServer {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
-    let _ = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(io::stderr)
-        .try_init();
+fn run_mcp(args: Args) -> anyhow::Result<()> {
     tracing::info!("Starting Raggy MCP Server");
     tracing::debug!(
         "Model dir: {}, Dir: {}",
@@ -835,6 +900,55 @@ fn main() -> anyhow::Result<()> {
         let _quit_reason = running_service.waiting().await?;
         Ok(())
     })
+}
+
+fn run_index(args: Args) -> anyhow::Result<()> {
+    tracing::info!(
+        "Starting index build for model dir {} and source dir {}",
+        args.model_dir.display(),
+        args.dir.display()
+    );
+    let state = RaggyState::new(args);
+    state.verify_model_exists()?;
+    state.ensure_model_and_tokenizer_loaded()?;
+    state.index_files()?;
+    tracing::info!("Indexing complete");
+    Ok(())
+}
+
+fn run_query(args: Args, question: &str, top_k: usize) -> anyhow::Result<()> {
+    tracing::info!(
+        "Running query for model dir {} and source dir {}",
+        args.model_dir.display(),
+        args.dir.display()
+    );
+    let state = RaggyState::new(args);
+    state.load_cached_chunks()?;
+    state.verify_model_exists()?;
+    state.ensure_model_and_tokenizer_loaded()?;
+    let response = state.query(question, top_k)?;
+    let json = serde_json::to_string_pretty(&response)?;
+    println!("{json}");
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let _ = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(io::stderr)
+        .try_init();
+
+    match cli.command {
+        Command::Mcp(common_args) => run_mcp(common_args.into()),
+        Command::Index(common_args) => run_index(common_args.into()),
+        Command::Query(query_args) => run_query(
+            query_args.common.into(),
+            &query_args.question,
+            query_args.top_k,
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -956,6 +1070,89 @@ mod tests {
             "Query returned {} results, first result: {:?}",
             response.results.len(),
             response.results.first()
+        );
+    }
+
+    #[test]
+    fn test_cli_parsing_subcommands() {
+        let cli = Cli::try_parse_from([
+            "raggy",
+            "mcp",
+            "--model-dir",
+            "models/all-MiniLM-L6-v2",
+            "--dir",
+            ".",
+        ])
+        .expect("mcp subcommand should parse");
+        assert!(matches!(cli.command, Command::Mcp(_)));
+
+        let cli = Cli::try_parse_from([
+            "raggy",
+            "index",
+            "--model-dir",
+            "models/all-MiniLM-L6-v2",
+            "--dir",
+            ".",
+        ])
+        .expect("index subcommand should parse");
+        assert!(matches!(cli.command, Command::Index(_)));
+
+        let cli = Cli::try_parse_from([
+            "raggy",
+            "query",
+            "--model-dir",
+            "models/all-MiniLM-L6-v2",
+            "--dir",
+            ".",
+            "--question",
+            "How do I run tests?",
+            "--top-k",
+            "3",
+        ])
+        .expect("query subcommand should parse");
+        match cli.command {
+            Command::Query(query_args) => {
+                assert_eq!(query_args.question, "How do I run tests?");
+                assert_eq!(query_args.top_k, 3);
+                assert_eq!(query_args.common.extensions, ".txt,.md");
+            }
+            _ => panic!("Expected query subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_without_subcommand_fails() {
+        let err = Cli::try_parse_from([
+            "raggy",
+            "--model-dir",
+            "models/all-MiniLM-L6-v2",
+            "--dir",
+            ".",
+        ])
+        .expect_err("root args without subcommand should fail");
+        assert!(
+            err.to_string().contains("Usage: raggy <COMMAND>"),
+            "Expected subcommand parsing error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_query_fails_when_cache_missing() {
+        let args = Args {
+            model_dir: PathBuf::from("models/all-MiniLM-L6-v2"),
+            dir: PathBuf::from("definitely-non-existing-dir-for-cache-key"),
+            extensions: ".md".to_string(),
+            chunk_size: 512,
+            chunk_overlap: 50,
+        };
+        let state = RaggyState::new(args);
+
+        let err = state
+            .load_cached_chunks()
+            .expect_err("query cache load should fail when no index exists");
+        assert!(
+            err.to_string().contains("No index found"),
+            "Expected clear missing index error, got: {err}"
         );
     }
 }
