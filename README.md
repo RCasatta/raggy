@@ -2,12 +2,11 @@
 
 A RAG (Retrieval Augmented Generation) MCP Server that provides semantic search over documents using BERT embeddings.
 
-## Running Tests
+## Model
+
+The system need an embedding BERT model to operate.
 
 Tests require the `all-MiniLM-L6-v2` BERT model to be downloaded.
-
-### Download the Model
-
 Run the provided script to download the model files:
 
 ```bash
@@ -16,16 +15,19 @@ Run the provided script to download the model files:
 
 This will download the model to `models/all-MiniLM-L6-v2/` (approximately 90MB).
 
-### Run Tests
+## Run Tests
 
 ```bash
-cargo test
+cargo test --release # release mode suggested because computing embedding is expensive 
 ```
 
-## Running the Application
+## Running the MCP
 
 ```bash
 cargo run --release -- mcp --model-dir <path> --dir <path>
+
+# or with nix
+nix run -- mcp --model-dir <path> --dir <path>
 ```
 
 Required arguments:
@@ -38,41 +40,18 @@ Optional arguments:
 - `--chunk_overlap`: Overlap between chunks (default: 50)
 
 ## Shell-friendly Commands
+While the main purpose of this is using it via MCP protocol, it's fully testable with a couple of shell commands
 
 Build/update the index and exit:
 
 ```bash
-raggy index --model-dir ./models/all-MiniLM-L6-v2 --dir .
+cargo run --release -- index --model-dir ./models/all-MiniLM-L6-v2 --dir .
 ```
 
 Run a one-shot query using an existing index and print JSON to stdout:
 
 ```bash
-raggy query --model-dir ./models/all-MiniLM-L6-v2 --dir . --question "how do I run the project with nix?" --top-k 5
+cargo run --release -- query --model-dir ./models/all-MiniLM-L6-v2 --dir . --question "how do I run the project with nix?" --top-k 5
 ```
 
-If no index exists for the selected `model-dir` + `dir`, `raggy query` fails and asks you to run `raggy index` first.
-
-## Manual Query from Terminal
-
-You can query Raggy manually using the MCP Inspector:
-
-```bash
-npx -y @modelcontextprotocol/inspector ./target/release/raggy mcp --model-dir ./models/all-MiniLM-L6-v2 --dir .
-```
-
-Then open the local URL printed by Inspector, call `raggy_query`, and pass JSON input like:
-
-```json
-{"question":"how do I run the project with nix?","top_k":5}
-```
-
-## Development
-
-```bash
-cargo build          # Debug build
-cargo build --release # Release build
-cargo check          # Type-check without building
-cargo clippy         # Run lints
-cargo fmt            # Format code
-```
+If no index exists for the selected `model-dir` + `dir`, `raggy query` fails and asks you to index first.
