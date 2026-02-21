@@ -81,7 +81,6 @@ struct IndexParams {}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SearchResult {
     path: String,
-    chunk: String,
     start_line: usize,
     end_line: usize,
     score: f32,
@@ -96,7 +95,6 @@ struct QueryResponse {
 #[derive(Debug, Clone)]
 struct TextChunk {
     path: String,
-    chunk: String,
     start_line: usize,
     end_line: usize,
     embedding: Vec<f32>,
@@ -320,7 +318,6 @@ impl RaggyState {
                     let normalized = normalize_l2(&embedding);
                     indexed_chunks.push(TextChunk {
                         path,
-                        chunk: chunk_text,
                         start_line,
                         end_line,
                         embedding: normalized,
@@ -376,7 +373,6 @@ impl RaggyState {
                 let chunk = &chunks[idx];
                 SearchResult {
                     path: chunk.path.clone(),
-                    chunk: chunk.chunk.clone(),
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
                     score,
