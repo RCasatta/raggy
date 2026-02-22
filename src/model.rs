@@ -156,3 +156,33 @@ pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
 
     total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{cosine_similarity, dot_product_simd};
+
+    #[test]
+    fn dot_product_simd_matches_scalar_dot_product() {
+        // Include lengths around SIMD boundaries and mismatched inputs.
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 384] {
+            let a: Vec<f32> = (0..len).map(|i| (i as f32 * 0.37).sin()).collect();
+            let b: Vec<f32> = (0..len).map(|i| (i as f32 * 0.19).cos()).collect();
+
+            let scalar = cosine_similarity(&a, &b);
+            let simd = dot_product_simd(&a, &b);
+
+            assert!(
+                (scalar - simd).abs() <= 1e-5,
+                "len={len}: scalar={scalar}, simd={simd}"
+            );
+        }
+
+        // Explicitly verify mismatched lengths (both implementations use the shortest length).
+        let a: Vec<f32> = (0..25).map(|i| (i as f32 * 0.11).sin()).collect();
+        let b: Vec<f32> = (0..19).map(|i| (i as f32 * 0.23).cos()).collect();
+
+        let scalar = cosine_similarity(&a, &b);
+        let simd = dot_product_simd(&a, &b);
+        assert!((scalar - simd).abs() <= 1e-5);
+    }
+}

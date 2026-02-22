@@ -15,7 +15,7 @@ use tokenizers::Tokenizer;
 
 use crate::cache::{cache_file_path, load_cache, save_cache};
 use crate::chunking::{ChunkStrategy, chunk_text};
-use crate::model::{cosine_similarity, get_embedding, normalize_l2};
+use crate::model::{dot_product_simd, get_embedding, normalize_l2};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RaggyError {
@@ -316,7 +316,7 @@ impl RaggyState {
             .iter()
             .enumerate()
             .map(|(idx, chunk)| {
-                let score = cosine_similarity(&query_embedding, &chunk.embedding);
+                let score = dot_product_simd(&query_embedding, &chunk.embedding);
                 (idx, score)
             })
             .collect();
