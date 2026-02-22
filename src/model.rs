@@ -6,6 +6,7 @@ use candle_core::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use tokenizers::{PaddingParams, Tokenizer};
+use wide::f32x8;
 
 use crate::RaggyError;
 
@@ -112,6 +113,46 @@ pub fn normalize_l2(v: &[f32]) -> Vec<f32> {
     v.iter().map(|x| x / norm).collect()
 }
 
+/// This is the dot product of two vectors. Since we have normalized vector this is
+/// the same as the cosine similarity.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
+    // Ensure we only process up to the shortest slice length to prevent panics
+    let len = a.len().min(b.len());
+    let a = &a[..len];
+    let b = &b[..len];
+
+    // f32x8 acts like 8 separate f32 values processed simultaneously
+    let mut sum = f32x8::ZERO;
+
+    // Create iterators that yield exactly 8 elements at a time
+    let mut chunks_a = a.chunks_exact(8);
+    let mut chunks_b = b.chunks_exact(8);
+
+    // 1. The Fast Path (SIMD processing)
+    for (chunk_a, chunk_b) in chunks_a.by_ref().zip(chunks_b.by_ref()) {
+        // Convert the slice chunks into [f32; 8] arrays, then into SIMD types.
+        // The unwrap() is perfectly safe here because chunks_exact(8) guarantees the length.
+        let va = f32x8::from(<[f32; 8]>::try_from(chunk_a).unwrap());
+        let vb = f32x8::from(<[f32; 8]>::try_from(chunk_b).unwrap());
+
+        // Multiply the 8 pairs and add them to our running totals in a single instruction
+        sum += va * vb;
+    }
+
+    // Combine the 8 independent parallel accumulation lanes into a single standard float
+    let mut total = sum.reduce_add();
+
+    // 2. The Tail Processing (Scalar fallback)
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    for (x, y) in remainder_a.iter().zip(remainder_b.iter()) {
+        total += x * y;
+    }
+
+    total
 }
