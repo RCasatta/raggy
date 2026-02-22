@@ -5,7 +5,7 @@ pub mod server;
 
 use std::collections::HashMap;
 use std::fs;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use candle_transformers::models::bert::BertModel;
 use ignore::WalkBuilder;
@@ -291,6 +291,7 @@ impl RaggyState {
     }
 
     pub fn query(&self, question: &str, top_k: usize) -> Result<QueryResponse, RaggyError> {
+        let total_start = Instant::now();
         let status = self.indexing_status.read().clone();
 
         let model_guard = self.model.read();
@@ -306,12 +307,18 @@ impl RaggyState {
             None => return Err(RaggyError::QueryError("Tokenizer not loaded".to_string())),
         };
 
+        let embedding_start = Instant::now();
         let query_embedding = get_embedding(model, tokenizer, question)
             .map_err(|e| RaggyError::QueryError(e.to_string()))?;
+        tracing::info!(
+            "Timing: query_get_embedding {:?}",
+            embedding_start.elapsed()
+        );
 
         let query_embedding = normalize_l2(&query_embedding);
 
         let chunks = self.chunks.read();
+        let scoring_start = Instant::now();
         let mut scores: Vec<(usize, f32)> = chunks
             .iter()
             .enumerate()
@@ -320,10 +327,18 @@ impl RaggyState {
                 (idx, score)
             })
             .collect();
+        tracing::info!(
+            "Timing: query_score_chunks {:?} for {} chunks",
+            scoring_start.elapsed(),
+            chunks.len()
+        );
 
+        let sort_start = Instant::now();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(top_k);
+        tracing::info!("Timing: query_sort_and_truncate {:?}", sort_start.elapsed());
 
+        let results_start = Instant::now();
         let results: Vec<SearchResult> = scores
             .into_iter()
             .map(|(idx, score)| {
@@ -336,6 +351,8 @@ impl RaggyState {
                 }
             })
             .collect();
+        tracing::info!("Timing: query_build_results {:?}", results_start.elapsed());
+        tracing::info!("Timing: query_total {:?}", total_start.elapsed());
 
         Ok(QueryResponse {
             results,

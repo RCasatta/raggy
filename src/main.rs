@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 
@@ -119,18 +120,42 @@ fn run_index(args: Args) -> anyhow::Result<()> {
 }
 
 fn run_query(args: Args, question: &str, top_k: usize) -> anyhow::Result<()> {
+    let total_start = Instant::now();
     tracing::info!(
         "Running query for model dir {} and source dir {}",
         args.model_dir.display(),
         args.dir.display()
     );
     let state = RaggyState::new(args);
+
+    let step_start = Instant::now();
     state.load_cached_chunks()?;
+    tracing::info!("Timing: load_cached_chunks {:?}", step_start.elapsed());
+
+    let step_start = Instant::now();
     state.verify_model_exists()?;
+    tracing::info!("Timing: verify_model_exists {:?}", step_start.elapsed());
+
+    let step_start = Instant::now();
     state.ensure_model_and_tokenizer_loaded()?;
+    tracing::info!(
+        "Timing: ensure_model_and_tokenizer_loaded {:?}",
+        step_start.elapsed()
+    );
+
+    let step_start = Instant::now();
     let response = state.query(question, top_k)?;
+    tracing::info!("Timing: state.query {:?}", step_start.elapsed());
+
+    let step_start = Instant::now();
     let json = serde_json::to_string_pretty(&response)?;
+    tracing::info!(
+        "Timing: serialize_query_response {:?}",
+        step_start.elapsed()
+    );
+
     println!("{json}");
+    tracing::info!("Timing: run_query_total {:?}", total_start.elapsed());
     Ok(())
 }
 
