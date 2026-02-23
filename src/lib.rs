@@ -9,7 +9,7 @@ use std::io::Read;
 use std::time::{Instant, UNIX_EPOCH};
 
 use candle_transformers::models::bert::BertModel;
-use content_inspector::{ContentType, inspect};
+use content_inspector::inspect;
 use ignore::WalkBuilder;
 use ignore::overrides::OverrideBuilder;
 use parking_lot::RwLock;
@@ -151,6 +151,8 @@ impl RaggyState {
 
         let mut current_files = Vec::new();
         let walker = self.build_walker()?;
+        let progress_interval = std::time::Duration::from_secs(5);
+        let mut last_discovery_log = Instant::now();
 
         for entry in walker {
             let Ok(entry) = entry else {
@@ -176,6 +178,14 @@ impl RaggyState {
             };
 
             current_files.push((path.to_path_buf(), path.display().to_string(), mtime));
+
+            if last_discovery_log.elapsed() >= progress_interval {
+                tracing::info!(
+                    "Index discovery progress: {} text files found so far",
+                    current_files.len()
+                );
+                last_discovery_log = Instant::now();
+            }
         }
 
         if current_files.is_empty() {
@@ -184,6 +194,9 @@ impl RaggyState {
                 self.args.dir.display().to_string(),
             ));
         }
+
+        let total_files = current_files.len();
+        tracing::info!("Index discovery complete: {total_files} text files to process");
 
         let model_guard = self.model.read();
         let tokenizer_guard = self.tokenizer.read();
@@ -226,6 +239,9 @@ impl RaggyState {
         let mut indexed_files = HashMap::new();
         let mut reused_files = 0usize;
         let mut reindexed_files = 0usize;
+        let mut processed_files = 0usize;
+        let mut skipped_files = 0usize;
+        let mut last_processing_log = Instant::now();
 
         for (path_buf, path_string, mtime) in current_files {
             let is_unchanged = cached_files
@@ -238,12 +254,31 @@ impl RaggyState {
                 indexed_chunks.extend(cached_chunks);
                 indexed_files.insert(path_string, mtime);
                 reused_files += 1;
+                processed_files += 1;
+
+                if last_processing_log.elapsed() >= progress_interval {
+                    tracing::info!(
+                        "Index processing progress: {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files})"
+                    );
+                    last_processing_log = Instant::now();
+                }
                 continue;
             }
 
             let content = match fs::read_to_string(&path_buf) {
                 Ok(content) => content,
-                Err(_) => continue,
+                Err(_) => {
+                    skipped_files += 1;
+                    processed_files += 1;
+
+                    if last_processing_log.elapsed() >= progress_interval {
+                        tracing::info!(
+                            "Index processing progress: {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files})"
+                        );
+                        last_processing_log = Instant::now();
+                    }
+                    continue;
+                }
             };
 
             let ext = path_buf
@@ -276,6 +311,14 @@ impl RaggyState {
             }
             indexed_files.insert(path_string, mtime);
             reindexed_files += 1;
+            processed_files += 1;
+
+            if last_processing_log.elapsed() >= progress_interval {
+                tracing::info!(
+                    "Index processing progress: {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files})"
+                );
+                last_processing_log = Instant::now();
+            }
         }
 
         if indexed_chunks.is_empty() {
@@ -286,7 +329,7 @@ impl RaggyState {
         }
 
         tracing::info!(
-            "Index ready: reused {reused_files} files, reindexed {reindexed_files} files, total chunks {}",
+            "Index ready: processed {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files}), total chunks {}",
             indexed_chunks.len()
         );
 
