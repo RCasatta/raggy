@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{RaggyError, TextChunk};
 
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedIndex {

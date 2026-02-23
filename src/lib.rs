@@ -77,6 +77,11 @@ pub struct RaggyState {
     indexing_status: RwLock<String>,
 }
 
+fn short_path(full_path: &str) -> String {
+    let parts: Vec<&str> = full_path.rsplit('/').take(2).collect();
+    parts.into_iter().rev().collect::<Vec<_>>().join("/")
+}
+
 impl RaggyState {
     pub fn new(args: Args) -> Self {
         Self {
@@ -244,8 +249,10 @@ impl RaggyState {
                 self.args.chunk_overlap,
                 &strategy,
             );
+            let prefix = short_path(&path_string);
             for (chunk_text, start_line, end_line) in text_chunks {
-                match get_embedding(model, tokenizer, &chunk_text) {
+                let embedding_text = format!("{prefix}\n{chunk_text}");
+                match get_embedding(model, tokenizer, &embedding_text) {
                     Ok(embedding) => {
                         let normalized = normalize_l2(&embedding);
                         indexed_chunks.push(TextChunk {
@@ -390,6 +397,24 @@ impl RaggyState {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_short_path_with_parent() {
+        let result = short_path("/home/casatta/gb/kb/docs/2026-02-06_Pagella.txt");
+        assert_eq!(result, "docs/2026-02-06_Pagella.txt");
+    }
+
+    #[test]
+    fn test_short_path_single_component() {
+        let result = short_path("file.txt");
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn test_short_path_two_components() {
+        let result = short_path("dir/file.txt");
+        assert_eq!(result, "dir/file.txt");
+    }
 
     #[test]
     fn test_query_fails_when_cache_missing() {
