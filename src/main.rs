@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+use grep_matcher::{Match, Matcher};
+use grep_regex::RegexMatcherBuilder;
+use ignore::WalkBuilder;
 
 use raggy::chunking::{ChunkStrategy, chunk_text};
 use raggy::{Args, RaggyState};
@@ -86,6 +89,26 @@ struct ChunksCommandArgs {
     strategy: StrategyArg,
 }
 
+#[derive(ClapArgs, Debug, Clone)]
+struct RgCommandArgs {
+    /// Directory to search recursively
+    dir: PathBuf,
+
+    /// Single word to search for (case-insensitive)
+    #[arg(value_parser = parse_single_word)]
+    word: String,
+}
+
+fn parse_single_word(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        return Err("word cannot be empty".to_string());
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err("word must be a single token without spaces".to_string());
+    }
+    Ok(value.to_string())
+}
+
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
     #[command(about = "Start the MCP server")]
@@ -96,6 +119,8 @@ enum Command {
     Query(QueryCommandArgs),
     #[command(about = "Split a file into chunks and print them")]
     Chunks(ChunksCommandArgs),
+    #[command(about = "Recursively search for a word and rank files by occurrences")]
+    Rg(RgCommandArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -194,6 +219,50 @@ fn run_chunks(args: ChunksCommandArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_rg(args: RgCommandArgs) -> anyhow::Result<()> {
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(true)
+        .build(&args.word)?;
+
+    let mut files_with_counts: Vec<(PathBuf, usize)> = Vec::new();
+
+    for entry in WalkBuilder::new(&args.dir).follow_links(true).build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let content = match fs::read(path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+
+        let mut occurrences = 0usize;
+        matcher.find_iter(&content, |_: Match| {
+            occurrences += 1;
+            true
+        })?;
+
+        if occurrences > 0 {
+            files_with_counts.push((path.to_path_buf(), occurrences));
+        }
+    }
+
+    files_with_counts.sort_by(|(path_a, count_a), (path_b, count_b)| {
+        count_b.cmp(count_a).then_with(|| path_a.cmp(path_b))
+    });
+
+    for (path, count) in files_with_counts {
+        println!("{count}\t{}", path.display());
+    }
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -213,6 +282,7 @@ fn main() -> anyhow::Result<()> {
             query_args.top_k,
         ),
         Command::Chunks(chunks_args) => run_chunks(chunks_args),
+        Command::Rg(rg_args) => run_rg(rg_args),
     }
 }
 
@@ -328,6 +398,29 @@ mod tests {
             }
             _ => panic!("Expected chunks subcommand"),
         }
+    }
+
+    #[test]
+    fn test_cli_parsing_rg_subcommand() {
+        let cli =
+            Cli::try_parse_from(["raggy", "rg", "src", "query"]).expect("rg subcommand parses");
+        match cli.command {
+            Command::Rg(args) => {
+                assert_eq!(args.dir, PathBuf::from("src"));
+                assert_eq!(args.word, "query");
+            }
+            _ => panic!("Expected rg subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_rg_requires_single_word() {
+        let err = Cli::try_parse_from(["raggy", "rg", "src", "two words"])
+            .expect_err("rg should reject words with spaces");
+        assert!(
+            err.to_string().contains("single token"),
+            "Expected single token error, got: {err}"
+        );
     }
 
     #[test]
