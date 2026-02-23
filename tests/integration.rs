@@ -101,3 +101,50 @@ fn test_mcp_integration() {
         response.results.first()
     );
 }
+
+#[test]
+fn test_most_characteristic_word_for_phrase() {
+    let model_dir = model_dir();
+
+    if !model_dir.join("model.safetensors").exists() {
+        panic!(
+            "Model not found at {}. Please run ./download_model.sh to download the model.",
+            model_dir.display()
+        );
+    }
+
+    let (model, tokenizer) =
+        load_model_and_tokenizer(&model_dir).expect("Failed to load model and tokenizer");
+
+    let phrase = "Who is the person called Riccardo Casatta?";
+    let phrase_embedding = get_embedding(&model, &tokenizer, phrase)
+        .map(|v| normalize_l2(&v))
+        .expect("Failed to generate embedding for phrase");
+
+    let words: Vec<&str> = phrase
+        .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()).trim())
+        .filter(|word| !word.is_empty())
+        .collect();
+
+    let (best_word, best_similarity) = words
+        .iter()
+        .map(|word| {
+            let word_embedding = get_embedding(&model, &tokenizer, word)
+                .map(|v| normalize_l2(&v))
+                .expect("Failed to generate embedding for word");
+            let similarity = cosine_similarity(&phrase_embedding, &word_embedding);
+            (*word, similarity)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .expect("Expected at least one word");
+
+    assert!(
+        (-1.0..=1.0).contains(&best_similarity),
+        "Cosine similarity should be between -1 and 1"
+    );
+    assert!(
+        ["Riccardo", "Casatta"].contains(&best_word),
+        "Expected one of the proper names to be the most characteristic word, got '{best_word}' with similarity {best_similarity}"
+    );
+}
