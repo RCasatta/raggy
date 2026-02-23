@@ -1,6 +1,6 @@
 # Raggy
 
-A RAG (Retrieval Augmented Generation) MCP Server that provides semantic search over documents using BERT embeddings.
+A RAG (Retrieval Augmented Generation) MCP Server that provides semantic search over text files using BERT embeddings.
 
 ```json
 {

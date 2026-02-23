@@ -16,8 +16,8 @@ struct CommonArgs {
     #[arg(long)]
     dir: PathBuf,
 
-    #[arg(long, default_value = ".txt,.md")]
-    extensions: String,
+    #[arg(long, help = "Glob patterns to exclude from indexing (repeatable)")]
+    exclude: Vec<String>,
 
     #[arg(long, default_value = "512")]
     chunk_size: usize,
@@ -31,7 +31,7 @@ impl From<CommonArgs> for Args {
         Self {
             model_dir: value.model_dir,
             dir: value.dir,
-            extensions: value.extensions,
+            exclude: value.exclude,
             chunk_size: value.chunk_size,
             chunk_overlap: value.chunk_overlap,
         }
@@ -233,7 +233,7 @@ mod tests {
         .expect("mcp subcommand should parse");
         match cli.command {
             Command::Mcp(mcp_args) => {
-                assert_eq!(mcp_args.common.extensions, ".txt,.md");
+                assert!(mcp_args.common.exclude.is_empty());
                 assert_eq!(mcp_args.query_tool_description, None);
             }
             _ => panic!("Expected mcp subcommand"),
@@ -288,7 +288,7 @@ mod tests {
             Command::Query(query_args) => {
                 assert_eq!(query_args.question, "How do I run tests?");
                 assert_eq!(query_args.top_k, 3);
-                assert_eq!(query_args.common.extensions, ".txt,.md");
+                assert!(query_args.common.exclude.is_empty());
             }
             _ => panic!("Expected query subcommand"),
         }

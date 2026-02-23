@@ -5,10 +5,13 @@ pub mod server;
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::time::{Instant, UNIX_EPOCH};
 
 use candle_transformers::models::bert::BertModel;
+use content_inspector::{ContentType, inspect};
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
@@ -42,7 +45,7 @@ pub enum RaggyError {
 pub struct Args {
     pub model_dir: std::path::PathBuf,
     pub dir: std::path::PathBuf,
-    pub extensions: String,
+    pub exclude: Vec<String>,
     pub chunk_size: usize,
     pub chunk_overlap: usize,
 }
@@ -117,25 +120,37 @@ impl RaggyState {
         Ok(())
     }
 
-    fn get_extensions(&self) -> Vec<String> {
-        self.args
-            .extensions
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .collect()
+    fn build_walker(&self) -> Result<ignore::Walk, RaggyError> {
+        let mut overrides = OverrideBuilder::new(&self.args.dir);
+        for pattern in &self.args.exclude {
+            overrides.add(&format!("!{pattern}")).map_err(|e| {
+                RaggyError::IndexingError(format!("Invalid exclude pattern '{pattern}': {e}"))
+            })?;
+        }
+        let overrides = overrides.build().map_err(|e| {
+            RaggyError::IndexingError(format!("Failed to build exclude overrides: {e}"))
+        })?;
+
+        Ok(WalkBuilder::new(&self.args.dir)
+            .follow_links(true)
+            .overrides(overrides)
+            .build())
+    }
+
+    fn is_text_file(path: &std::path::Path) -> bool {
+        let mut buf = [0u8; 1024];
+        let bytes_read = match fs::File::open(path).and_then(|mut f| f.read(&mut buf)) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        inspect(&buf[..bytes_read]).is_text()
     }
 
     pub fn index_files(&self) -> Result<(), RaggyError> {
         *self.indexing_status.write() = "in_progress".to_string();
 
-        let extensions = self.get_extensions();
         let mut current_files = Vec::new();
-
-        let walker = WalkBuilder::new(&self.args.dir)
-            .follow_links(true)
-            .hidden(false)
-            .ignore(false)
-            .build();
+        let walker = self.build_walker()?;
 
         for entry in walker {
             let Ok(entry) = entry else {
@@ -148,13 +163,7 @@ impl RaggyState {
                 continue;
             }
 
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_lowercase())
-                .unwrap_or_default();
-
-            if !extensions.iter().any(|e| e.trim_start_matches('.') == ext) {
+            if !Self::is_text_file(path) {
                 continue;
             }
 
@@ -421,7 +430,7 @@ mod tests {
         let args = Args {
             model_dir: PathBuf::from("models/all-MiniLM-L6-v2"),
             dir: PathBuf::from("definitely-non-existing-dir-for-cache-key"),
-            extensions: ".md".to_string(),
+            exclude: Vec::new(),
             chunk_size: 512,
             chunk_overlap: 50,
         };

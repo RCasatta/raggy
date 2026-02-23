@@ -71,7 +71,7 @@ fn test_mcp_integration() {
     let args = Args {
         model_dir,
         dir: PathBuf::from("."),
-        extensions: ".md".to_string(),
+        exclude: Vec::new(),
         chunk_size: 512,
         chunk_overlap: 50,
     };

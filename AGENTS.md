@@ -24,9 +24,11 @@ Required arguments:
 - `--dir`: Directory to index for semantic search
 
 Optional arguments:
-- `--extensions`: Comma-separated file extensions to index (default: ".txt,.md")
+- `--exclude`: Glob patterns to exclude from indexing (repeatable, e.g. `--exclude "*.lock" --exclude "*.min.js"`)
 - `--chunk_size`: Size of text chunks (default: 512)
 - `--chunk_overlap`: Overlap between chunks (default: 50)
+
+By default all text files are indexed (detected via `content_inspector`). `.gitignore` rules and hidden files are respected.
 
 ### Development Tools
 
