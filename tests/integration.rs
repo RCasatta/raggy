@@ -8,6 +8,26 @@ fn model_dir() -> PathBuf {
     PathBuf::from("models/all-MiniLM-L6-v2")
 }
 
+fn init_test_tracing_from_env() {
+    let Some(level) = std::env::var("RUST_LOG").ok() else {
+        return;
+    };
+
+    let max_level = match level.trim().to_ascii_lowercase().as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        "warn" => tracing::Level::WARN,
+        "error" => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
+
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(max_level)
+        .with_test_writer()
+        .try_init();
+}
+
 #[test]
 fn test_embedding_generation() {
     let model_dir = model_dir();
@@ -55,9 +75,7 @@ fn test_embedding_generation() {
 
 #[test]
 fn test_mcp_integration() {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .try_init();
+    init_test_tracing_from_env();
 
     let model_dir = model_dir();
 
