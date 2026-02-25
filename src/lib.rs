@@ -249,20 +249,21 @@ impl RaggyState {
                 .map(|cached_mtime| *cached_mtime == mtime)
                 .unwrap_or(false);
 
-            if is_unchanged && let Some(cached_chunks) = cached_chunks_by_path.remove(&path_string)
-            {
-                indexed_chunks.extend(cached_chunks);
-                indexed_files.insert(path_string, mtime);
-                reused_files += 1;
-                processed_files += 1;
+            if is_unchanged {
+                if let Some(cached_chunks) = cached_chunks_by_path.remove(&path_string) {
+                    indexed_chunks.extend(cached_chunks);
+                    indexed_files.insert(path_string, mtime);
+                    reused_files += 1;
+                    processed_files += 1;
 
-                if last_processing_log.elapsed() >= progress_interval {
-                    tracing::info!(
-                        "Index processing progress: {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files})"
-                    );
-                    last_processing_log = Instant::now();
+                    if last_processing_log.elapsed() >= progress_interval {
+                        tracing::info!(
+                            "Index processing progress: {processed_files}/{total_files} files (reused {reused_files}, reindexed {reindexed_files}, skipped {skipped_files})"
+                        );
+                        last_processing_log = Instant::now();
+                    }
+                    continue;
                 }
-                continue;
             }
 
             let content = match fs::read_to_string(&path_buf) {
